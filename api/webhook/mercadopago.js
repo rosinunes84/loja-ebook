@@ -5,12 +5,15 @@ import admin from 'firebase-admin';
 if (!admin.apps.length) {
   const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT
     ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT)
-    : require('../../../serviceAccountKey.json'); // só se tiver o arquivo no repo
+    : require('../../../serviceAccountKey.json'); // Use só se tiver o arquivo no repo
   admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
 }
 const db = admin.firestore();
 
-mercadopago.configurations.setAccessToken(process.env.MP_ACCESS_TOKEN);
+mercadopago.configure({
+  access_token: process.env.MP_ACCESS_TOKEN,
+});
+
 
 function mapStatus(mpStatus) {
   const s = (mpStatus || '').toLowerCase();
@@ -24,11 +27,12 @@ export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).json({ error: 'Method Not Allowed' });
 
   try {
-    // Modo de simulação (útil durante testes)
+    // Modo simulação para testes
     if (req.query.simulate === '1' || req.headers['x-simulate'] === '1') {
       const orderId = req.body.orderId || req.body.external_reference || req.body.payment?.external_reference;
       const statusRaw = req.body.status || req.body.payment?.status;
-      if (!orderId || !statusRaw) return res.status(400).json({ error: 'orderId e status são obrigatórios no modo simulate' });
+      if (!orderId || !statusRaw)
+        return res.status(400).json({ error: 'orderId e status são obrigatórios no modo simulate' });
 
       await db.collection('orders').doc(String(orderId)).update({
         status: mapStatus(statusRaw),
@@ -40,7 +44,7 @@ export default async function handler(req, res) {
       return res.status(200).send('OK (simulate)');
     }
 
-    // Normal: parse do paymentId (Mercado Pago manda de formas diferentes)
+    // Obtém o paymentId do webhook
     const paymentId =
       req.body?.data?.id ||
       req.query['data.id'] ||
@@ -54,14 +58,14 @@ export default async function handler(req, res) {
       return res.status(400).send('payment id not found');
     }
 
-    // Busca o pagamento no Mercado Pago
+    // Busca pagamento no Mercado Pago
     const mpResp = await mercadopago.payment.findById(paymentId);
     const payment = mpResp.body;
     const statusRaw = payment.status;
     const externalRef = payment.external_reference;
     const prefId = payment.preference_id || payment.preference?.id;
 
-    // Se external_reference existe -> atualiza direto
+    // Atualiza Firestore pelo external_reference
     if (externalRef) {
       await db.collection('orders').doc(String(externalRef)).update({
         status: mapStatus(statusRaw),
@@ -72,7 +76,7 @@ export default async function handler(req, res) {
       return res.status(200).send('OK');
     }
 
-    // Se não veio external_reference, tenta buscar por preferenceId no Firestore
+    // Se não tiver external_reference, tenta pelo preferenceId
     if (prefId) {
       const q = await db.collection('orders').where('preferenceId', '==', String(prefId)).limit(1).get();
       if (!q.empty) {
